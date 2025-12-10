@@ -1,10 +1,16 @@
-# Project Architecture: SyncTask (MVP)
+# Project Architecture: SyncTask (MVP & Phase I)
 
 ## 1. Project Overview
 
-SyncTask is a real-time collaborative task board (similar to a simplified Trello). This document outlines the Minimum Viable Product (MVP) architecture, focusing on the separation of concerns, security, and real-time data synchronization.
+SyncTask is a real-time collaborative task board. This document outlines the architectural evolution from the Minimum Viable Product (MVP) to a production-ready Phase I release, followed by a strategy for future scaling (Phase II).
 
-## 2. Architecture Diagram
+---
+
+## 2. Architecture Diagram (MVP + Phase I)
+
+This diagram visualizes the system:
+- **Solid Lines/Shapes:** Represent the core MVP components
+- **Dashed Lines / Green Shapes:** Represent Phase I additions required for a stable public release
 
 ```mermaid
 graph TD
@@ -12,7 +18,8 @@ graph TD
     classDef actor fill:#f9f,stroke:#333,stroke-width:2px;
     classDef public fill:#e1f5fe,stroke:#0277bd,stroke-width:2px,stroke-dasharray: 5 5;
     classDef private fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,stroke-dasharray: 5 5;
-    classDef component fill:#fff,stroke:#333,stroke-width:1px;
+    classDef mvpComponent fill:#fff,stroke:#333,stroke-width:2px;
+    classDef phase1Component fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,stroke-dasharray: 5 5;
 
     %% Actors
     User((User/Client)):::actor
@@ -20,91 +27,97 @@ graph TD
     %% Public Zone (DMZ)
     subgraph Public_Internet ["☁️ Public Internet / DMZ"]
         direction TB
-        CDN[("Static Assets CDN<br/>(React App)")]:::component
-        LoadBalancer["Reverse Proxy / Load Balancer<br/>(Nginx)"]:::component
+        CDN[("Static Assets CDN<br/>(MVP: React App)")]:::mvpComponent
+        LoadBalancer["Reverse Proxy / Nginx<br/>(MVP: Ingress)"]:::mvpComponent
     end
 
     %% Private Zone (Internal Network)
     subgraph Private_Network ["🔒 Private Network (VPC)"]
         direction TB
-        APIServer["API Server Cluster<br/>(Node.js/Express)"]:::component
-        AuthService["Auth Middleware"]:::component
-        DB[("Database<br/>(PostgreSQL)")]:::component
+        APIServer["API Server Cluster<br/>(MVP: Node.js)"]:::mvpComponent
+        AuthService["Auth Middleware<br/>(MVP: Logic)"]:::mvpComponent
+        DB[("Database<br/>(MVP: PostgreSQL)")]:::mvpComponent
+        
+        %% PHASE I ADDITIONS (Internal)
+        Redis[("Redis Cache<br/>(Phase I: Pub/Sub & Sessions)")]:::phase1Component
+        Worker["Async Worker Service<br/>(Phase I: Background Jobs)"]:::phase1Component
+    end
+
+    %% External Services (Phase I)
+    subgraph External_Services ["🌍 External Managed Services (Phase I)"]
+        S3[("Object Storage<br/>(Phase I: S3 - Attachments)")]:::phase1Component
+        Email[("Email Service<br/>(Phase I: SendGrid)")]:::phase1Component
+        Monitor[("Monitoring & Logging<br/>(Phase I: Datadog/CloudWatch)")]:::phase1Component
     end
 
     %% Connections
-    User -- "HTTPS (Port 443)<br/>[Auth: None for assets]" --> CDN
-    User -- "HTTPS / WSS (Secure WebSocket)<br/>[Auth: Bearer Token]" --> LoadBalancer
+    User -- HTTPS / WSS --> LoadBalancer
+    User -- HTTPS --> CDN
     
-    LoadBalancer -- "HTTP (Port 80)<br/>Internal Traffic" --> APIServer
+    LoadBalancer -- HTTP --> APIServer
     
-    APIServer -- "Check/Verify JWT" --> AuthService
-    APIServer -- "TCP (Port 5432)" --> DB
+    APIServer -- SQL --> DB
+    APIServer -- Verify --> AuthService
+    
+    %% Phase 1 Connections
+    APIServer -.-> Redis
+    APIServer -.-> Worker
+    Worker -.-> Email
+    APIServer -.-> S3
+    APIServer -.-> Monitor
+    DB -.-> Monitor
 
     %% Apply Subgraph Styles
     class Public_Internet public
     class Private_Network private
 ```
 
-> **Note:** If the diagram above displays as code on GitHub, it means the native Mermaid viewer might be disabled in your specific view. However, it is valid syntax.
+---
 
-## 3. MVP Component Breakdown
+## 3. Phase I: Production Readiness (Release Strategy)
 
-To maintain MVP scope, only essential components are included:
+While the MVP demonstrates functionality, Phase I introduces the reliability and management layers necessary for a public launch. We cannot release to real users without these safeguards.
 
-- **Frontend (SPA):** A React-based Single Page Application.
-- **Load Balancer/Proxy:** Nginx to handle SSL termination and route traffic.
-- **Backend API:** Node.js/Express server to handle business logic.
-- **Database:** PostgreSQL for persistent relational data storage.
+### New Components & Justification
 
-## 4. Users & Interface Strategy
+| Component | Type | Why it is needed for Release (Phase I) |
+|-----------|------|----------------------------------------|
+| **Redis** | Caching / PubSub | **Scalability:** In the MVP, WebSockets only work on one server. To support multiple servers for reliability, Redis is required to "bridge" messages between users connected to different server instances. |
+| **Object Storage** | S3 / Blob | **Performance:** Storing user-uploaded images/attachments in the database is an anti-pattern. S3 provides cheap, scalable storage without bloating the DB. |
+| **Email Service** | External API | **Account Recovery:** Real users forget passwords. Without an email service (like SendGrid), we cannot offer "Forgot Password" functionality, resulting in permanent user lockouts. |
+| **Monitoring** | Observability | **Reliability:** We need automated alerts (e.g., Datadog or CloudWatch) to know if the server crashes before users complain. |
 
-### The User
-Interacts with the system via a standard web browser.
+---
 
-### The Interface
-1. The user requests the application URL.
-2. The CDN delivers the static HTML/CSS/JS bundle immediately.
-3. Once loaded, the browser acts as a "thick client," performing API calls to the backend to fetch dynamic data (tasks, columns, user profile).
+## 4. Phase II: Scaling & Optimization (Future)
 
-## 5. Communication & Authentication
+Phase II focuses on handling growth and improving user experience based on usage patterns.
 
-### Communication Strategies
+### Proposed Changes & Triggers
 
-- **HTTPS (REST):** Used for standard transactional operations (e.g., Creating a card, editing a profile). Encryption ensures data privacy in transit.
-- **WSS (Secure WebSockets):** Used for real-time collaboration. When User A moves a card, a WebSocket event is broadcast to the API, which pushes the update to User B instantly.
-- **TCP:** Used strictly for internal server-to-database communication.
+| Feature | Change Required | Implementation Order & Trigger Signal |
+|---------|-----------------|---------------------------------------|
+| **Advanced Search** | Add Elasticsearch or Algolia | **Trigger:** When simple SQL LIKE queries take >200ms or task volume exceeds 10,000 per board. |
+| **Push Notifications** | Add Firebase (FCM) and Service Workers | **Trigger:** User feedback requesting updates while away from the desk ("I missed a task assignment"). |
+| **Data Analytics** | Add Data Warehouse (Snowflake) pipeline | **Trigger:** Marketing/Product teams need complex reports on "User Retention" that slow down the production DB. |
 
-### Authentication Strategy
+### Decision Logic: How we decide what comes next
 
-**Method:** JSON Web Tokens (JWT).
+We prioritize Phase II features based on **Technical Debt vs. User Signals:**
 
-**Flow:**
-1. User logs in via HTTPS.
-2. Server verifies credentials and issues a signed JWT.
-3. Client stores JWT (HttpOnly Cookie or Memory).
-4. Client attaches the JWT as a Bearer Token in the Authorization header for all subsequent API and WebSocket requests.
+- **High Priority (Technical Bottlenecks):** If the Database CPU hits 80% utilization consistently, Search Offloading becomes the immediate priority to prevent outages.
+- **Medium Priority (User Signals):** If users complain about missing updates, Push Notifications are prioritized to improve retention.
+- **Low Priority (Nice-to-haves):** Features like "AI Task Summaries" are deferred until core stability and retention metrics are met.
 
-## 6. Network Segmentation (Public vs. Private)
+---
 
-To ensure security, the infrastructure is divided into two zones:
-
-### 🟢 Directly Available (Public Internet)
-
-- **CDN:** Hosts the static frontend files.
-- **Load Balancer (Nginx):** The single entry point for API traffic. It exposes port 443 (HTTPS) to the world.
-
-### 🔴 Internal Only (Private Network/VPC)
-
-- **API Server:** Does not have a public IP. It accepts traffic only from the Load Balancer.
-- **Database:** Deepest layer of security. Accepts connections only from the API Server on port 5432. No public internet access.
-
-## 7. Legend
+## 5. Legend
 
 | Symbol / Style | Meaning |
 |----------------|---------|
-| Solid Line | Synchronous Request (Request/Response) |
-| Blue Dashed Box | Public Zone: Accessible by anyone on the internet |
-| Orange Dashed Box | Private Zone: Accessible only by internal systems |
-| Cylinder | Data Storage |
-| WSS | WebSocket Secure (Real-time connection) |
+| **Solid White Box** | MVP Component: Essential for the app to function. |
+| **Dashed Green Box** | Phase I Component: Essential for reliability/production. |
+| **Solid Line** | Synchronous Traffic: HTTP Request/Response. |
+| **Dashed Line** | Asynchronous/Back-channel: Logs, background jobs, cache. |
+| **Blue Area** | Public Zone: Exposed to the internet. |
+| **Orange Area** | Private Zone: Protected internal network. |
